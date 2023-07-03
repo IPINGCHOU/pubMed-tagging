@@ -79,7 +79,7 @@ def test_som():
     # train
     for iter_no in range(n_iters):
         for i, data in tqdm(enumerate(pubMedLoader)):
-            som(*data, iter_no)
+            _ = som(*data, iter_no)
 
     after_train_weight = som.weights.cpu().detach().numpy()
 
@@ -87,7 +87,7 @@ def test_som():
 
 
 def test_map_vects():
-    batch_size = 2
+    batch_size = 4
     n_iters = 5
     n_workers = 4
 

@@ -1,6 +1,9 @@
 import numpy as np
 import torch
 import torch.nn as nn
+import pickle
+import matplotlib.pyplot as plt
+import collections
 
 from tqdm.auto import tqdm
 from torch.autograd import Variable
@@ -53,7 +56,7 @@ class SapBERTembeddedSOM(nn.Module):
         self.dim = dim
         self.niter = niter
         self.bs = batch_size
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print("==== Trained on: ", self.device)
 
         if alpha is None:
@@ -65,7 +68,7 @@ class SapBERTembeddedSOM(nn.Module):
         else:
             self.sigma = float(sigma)
 
-        self.weights = torch.randn(m*n, dim).to(self.device)
+        self.weights = torch.FloatTensor(m*n, dim).uniform_(-1, 1).to(self.device)
         self.locations = torch.LongTensor(np.array(list(self.neuron_locations())))
         self.pdist = nn.PairwiseDistance(p=2)
 
@@ -96,6 +99,29 @@ class SapBERTembeddedSOM(nn.Module):
         bmu_loc = torch.LongTensor(np.array(list(map(lambda i: self.locations[i, :], bmu_index))))
         out.extend(bmu_loc.cpu().detach().tolist())
         return out
+    
+    def give_density_map(self, inputLoader):
+        mapped = []
+        print("=====mapping")
+        for i, data in tqdm(enumerate(inputLoader), total = len(inputLoader)):
+            mapped.extend(self.map_vects(*data))
+        
+        tupled = list(map(tuple, mapped))
+        counts = collections.Counter(tupled)
+        C = np.zeros([self.m, self.n])
+        for i in range(self.m):
+            for j in range(self.n):
+                C[i][j] = counts[(i,j)]
+        
+        plt.imshow(C, origin="lower", cmap='gray', interpolation='nearest')
+        plt.colorbar()
+        plt.show()
+        
+        return C
+                    
+    def save_model(self, iter):
+        with open('model_{0}.pkl'.format(iter), 'wb') as f:
+            pickle.dump(self.weights.cpu().detach().numpy(), f)
 
     def get_embedded(self, input_ids, token_type_ids, attention_masks):
         # output dim: (bs, 768)
@@ -104,6 +130,7 @@ class SapBERTembeddedSOM(nn.Module):
         attention_masks = attention_masks.to(self.device)
 
         cls_rep = self.sapModel(input_ids, token_type_ids, attention_masks)[0][:,0,:]
+        cls_rep = cls_rep
 
         return cls_rep
 
@@ -117,21 +144,24 @@ class SapBERTembeddedSOM(nn.Module):
         input2 = self.weights.repeat(bs, 1).reshape(bs, self.comps, self.dim)
 
         dists = self.pdist(input1, input2)
-        _, bmu_index = torch.min(dists, 1)
+        
+        bmu_dist, bmu_index = torch.min(dists, 1)
+        
         bmu_loc = torch.LongTensor(np.array(list(map(lambda i: self.locations[i, :], bmu_index))))
         bmu_loc_shape = bmu_loc.size()
 
         learning_rate_op = 1.0 - it/self.niter
+        # learning_rate_op = 1 * np.power(0.5, it)
         alpha_op = self.alpha * learning_rate_op
-        sigma_op = self.sigma * learning_rate_op
+        sigma_op = max(self.sigma * learning_rate_op, 1)
         
-        bmu_d1 = self.locations.float().repeat(bs, 1).reshape(bs, self.comps, bmu_loc_shape[-1])
-        bmu_d2 = bmu_loc.float().repeat(1, self.comps).reshape(bs, self.comps, bmu_loc_shape[-1])
-        bmu_distance_squares = torch.pow(bmu_d1 - bmu_d2, 2).sum(-1)
+        bmu_distance_squares = torch.pow(self.locations.float().repeat(bs, 1).reshape(bs, self.comps, bmu_loc_shape[-1]) -
+                                         bmu_loc.float().repeat(1, self.comps).reshape(bs, self.comps, bmu_loc_shape[-1]), 2).sum(-1)
         neighbourhood_func = torch.exp(torch.neg(torch.div(bmu_distance_squares, sigma_op**2)))
         learning_rate_op = alpha_op * neighbourhood_func
 
         learning_rate_multiplier = learning_rate_op.repeat(1, self.dim).reshape(bs, self.comps, self.dim).to(self.device)
-        delta = torch.mul(learning_rate_multiplier, input1 - input2).sum(0)                                         
-        new_weights = torch.add(self.weights, delta)
-        self.weights = new_weights
+        delta = torch.div(torch.mul(learning_rate_multiplier, input1 - input2).sum(0), bs)                          
+        self.weights = torch.add(self.weights, delta).detach()
+        
+        return bmu_dist.sum().cpu().detach().numpy()
