@@ -39,9 +39,45 @@ class pubMedDataset(torch.utils.data.Dataset):
     def __getitem__(self, index):
         return self.input_ids[index], self.token_type_ids[index], self.attention_masks[index]
 
+# ================ embedding only
+class SapBERTembedded(nn.Module):
+    # SOM Reference : https://github.com/giannisnik/som/blob/master/som.py
+    # BatchSOM Reference : https://github.com/meder411/som-pytorch/blob/master/som.py
+    # SapBERT Reference: https://huggingface.co/cambridgeltl/SapBERT-from-PubMedBERT-fulltext
+
+    """
+    2-D Self-Organizing Map with Gaussian Neighbourhood function
+    and linearly decreasing learning rate.
+    """
+    def __init__(self):
+        super(SapBERTembedded, self).__init__()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.sapModel = AutoModel.from_pretrained("cambridgeltl/SapBERT-from-PubMedBERT-fulltext").to(self.device)
+ 
+    def get_embedded(self, input_ids, token_type_ids, attention_masks):
+        # output dim: (bs, 768)
+        input_ids = input_ids.to(self.device)
+        token_type_ids = token_type_ids.to(self.device)
+        attention_masks = attention_masks.to(self.device)
+
+        cls_rep = self.sapModel(input_ids, token_type_ids, attention_masks)[0][:,0,:]
+        cls_rep = cls_rep
+
+        return cls_rep
+
+
+    def forward(self, i, t, a):
+        # batched version
+        embedded = self.get_embedded(i, t, a)
+        embedded = embedded.cpu().detach().numpy()
+        return embedded
+
+
+
 
 class SapBERTembeddedSOM(nn.Module):
     # SOM Reference : https://github.com/giannisnik/som/blob/master/som.py
+    # BatchSOM Reference : https://github.com/meder411/som-pytorch/blob/master/som.py#L292
     # SapBERT Reference: https://huggingface.co/cambridgeltl/SapBERT-from-PubMedBERT-fulltext
 
     """
@@ -56,6 +92,12 @@ class SapBERTembeddedSOM(nn.Module):
         self.dim = dim
         self.niter = niter
         self.bs = batch_size
+        
+        self.contents = None
+        self.grid = None
+        self.grid_used = None
+        self.grid_dists = None
+        
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print("==== Trained on: ", self.device)
 
@@ -68,12 +110,26 @@ class SapBERTembeddedSOM(nn.Module):
         else:
             self.sigma = float(sigma)
 
-        self.weights = torch.FloatTensor(m*n, dim).uniform_(-1, 1).to(self.device)
-        self.locations = torch.LongTensor(np.array(list(self.neuron_locations())))
-        self.pdist = nn.PairwiseDistance(p=2)
-
+        self.pdist = nn.PairwiseDistance(p = 2)
         self.sapModel = AutoModel.from_pretrained("cambridgeltl/SapBERT-from-PubMedBERT-fulltext").to(self.device)
+        self.init_grid()
 
+    def init_grid(self):
+        self.contents = give_grid(self.m, self.n, self.dim).to(self.device)
+        
+        # create grid index matrix
+        x, y = np.meshgrid(range(self.m), range(self.n))
+        x = torch.from_numpy(x)
+        y = torch.from_numpy(y)
+        
+        self.grid = torch.stack((x,y)).to(self.device)
+        self.grid_used = torch.zeros(self.m, self.n).long().to(self.device)
+        
+        self.grid_dists = pdist2(
+            self.grid.float().view(2, -1),
+            self.grid.float().view(2, -1),
+            0
+        ).to(self.device)
 
     def get_weights(self):
         return self.weights
@@ -90,14 +146,8 @@ class SapBERTembeddedSOM(nn.Module):
         out = []
         # vectorized version
         embedded = self.get_embedded(i, t, a)
-        bs = len(embedded)
-
-        input1 = embedded.repeat(1, self.comps).reshape(bs, self.comps, self.dim)
-        input2 = self.weights.repeat(bs, 1).reshape(bs, self.comps, self.dim)
-        dists = self.pdist(input1, input2)
-        _, bmu_index = torch.min(dists, 1)
-        bmu_loc = torch.LongTensor(np.array(list(map(lambda i: self.locations[i, :], bmu_index))))
-        out.extend(bmu_loc.cpu().detach().tolist())
+        min_index = self.find_bmu(embedded)
+        out.extend(min_index.cpu().detach().tolist())
         return out
     
     def give_density_map(self, inputLoader):
@@ -106,6 +156,7 @@ class SapBERTembeddedSOM(nn.Module):
         for i, data in tqdm(enumerate(inputLoader), total = len(inputLoader)):
             mapped.extend(self.map_vects(*data))
         
+        mapped = list(map(lambda x: [x // self.m, x % self.m], mapped))
         tupled = list(map(tuple, mapped))
         counts = collections.Counter(tupled)
         C = np.zeros([self.m, self.n])
@@ -121,7 +172,7 @@ class SapBERTembeddedSOM(nn.Module):
                     
     def save_model(self, iter):
         with open('model_{0}.pkl'.format(iter), 'wb') as f:
-            pickle.dump(self.weights.cpu().detach().numpy(), f)
+            pickle.dump(self.contents.cpu().detach().numpy(), f)
 
     def get_embedded(self, input_ids, token_type_ids, attention_masks):
         # output dim: (bs, 768)
@@ -134,34 +185,93 @@ class SapBERTembeddedSOM(nn.Module):
 
         return cls_rep
 
-
-    def forward(self, i, t, a, it):
-        # vectorized version
+    def forward(self, i, t, a, it, sigma):
+        # batched version
+        
+        # # parameters
+        # learning_rate_op = 1.0 - it/self.niter
+        # # learning_rate_op = 1 * np.power(0.5, it)
+        # alpha_op = self.alpha * learning_rate_op
+        # sigma_op = max(self.sigma * learning_rate_op, 1)
+        
+        # get embedding (input)
         embedded = self.get_embedded(i, t, a)
-        bs = len(embedded)
-
-        input1 = embedded.repeat(1, self.comps).reshape(bs, self.comps, self.dim)
-        input2 = self.weights.repeat(bs, 1).reshape(bs, self.comps, self.dim)
-
-        dists = self.pdist(input1, input2)
         
-        bmu_dist, bmu_index = torch.min(dists, 1)
+        # get weight
+        weights = self.compute_weight(sigma, True)
         
-        bmu_loc = torch.LongTensor(np.array(list(map(lambda i: self.locations[i, :], bmu_index))))
-        bmu_loc_shape = bmu_loc.size()
+        # find bmu
+        min_index = self.find_bmu(embedded)
+        
+        # compute the freq with nodes are BMU
+        freq_data = torch.zeros(self.comps).to(self.device)
+        freq_data.index_add_(0, min_index, torch.ones(embedded.shape[0]).to(self.device))
+        
+        # store the updated freq fro each node
+        self.grid_used += (freq_data != 0).view(self.m, self.n).long()
+        
+        # compute aggregate data values for each neighborhood
+        avg_data = torch.zeros(self.comps, self.dim).to(self.device)
+        avg_data.index_add_(0, min_index, embedded)
+        avg_data = avg_data / freq_data.view(-1, 1)
+        
+        # weighted neibourhood
+        freq_weights = weights * freq_data.view(-1, 1)
+        
+        # fill the non-bmu nodes with existed contents
+        unused_idx = (freq_data == 0).nonzero()
+        if unused_idx.shape:
+             avg_data[unused_idx, :] = self.contents.view(-1, self.dim)[unused_idx, :]
+             
+        # update
+        update_num = (freq_weights.unsqueeze(2) * avg_data).sum(1)
+        update_denom = freq_weights.sum(1)
+        update = update_num / update_denom.unsqueeze(1)
+        # idx to update
+        update_idx = update_denom.nonzero()
+        
+        # copy old contents for magnitude computation
+        old_c = self.contents.clone()
+        
+        # update the contents
+        self.contents.view(-1, self.dim)[update_idx, :] = update[update_idx, :].detach()
+        
+        return torch.norm(self.contents - old_c, 2, -1).sum().cpu().detach().numpy()
+    
+    def compute_weight(self, sigma, weighted):
+        if weighted:
+            return torch.exp(-self.grid_dists / (2 * sigma**2))
+        else:
+            return (self.grid_dists < sigma).float()
+        
+    def find_bmu(self, x, k = 1):
+        N = x.shape[0]
+        diff = x.view(-1, 1, self.dim) - self.contents.view(1, -1, self.dim)
+        dist = (diff ** 2).sum(-1)
+    
+        _, min_idx = dist.topk(k = k, dim = 1, largest = False)
+        
+        return min_idx.squeeze()
+    
+# ================ utils
+def give_grid(m, n, dim):
+    grid = torch.randn(m, n, dim)
+    
+    return grid
 
-        learning_rate_op = 1.0 - it/self.niter
-        # learning_rate_op = 1 * np.power(0.5, it)
-        alpha_op = self.alpha * learning_rate_op
-        sigma_op = max(self.sigma * learning_rate_op, 1)
-        
-        bmu_distance_squares = torch.pow(self.locations.float().repeat(bs, 1).reshape(bs, self.comps, bmu_loc_shape[-1]) -
-                                         bmu_loc.float().repeat(1, self.comps).reshape(bs, self.comps, bmu_loc_shape[-1]), 2).sum(-1)
-        neighbourhood_func = torch.exp(torch.neg(torch.div(bmu_distance_squares, sigma_op**2)))
-        learning_rate_op = alpha_op * neighbourhood_func
+def pdist2(X, Y, dim):
+	N = X.shape[abs(dim-1)]	
+	K = Y.shape[abs(dim-1)]
+	XX = (X ** 2).sum(dim).unsqueeze(abs(0-dim)).expand(K, -1)
+	YY = (Y ** 2).sum(dim).unsqueeze(abs(1-dim)).expand(-1, N)
+	if dim == 0:
+		XX = XX.expand(K, -1)
+		YY = YY.expand(-1, N)
+		prod = torch.mm(X.transpose(0,1), Y)
+	else:
+		XX = XX.expand(-1, K)
+		YY = YY.expand(N, -1)
+		prod = torch.mm(X, Y.transpose(0,1))
+	return XX + YY - 2 * prod
 
-        learning_rate_multiplier = learning_rate_op.repeat(1, self.dim).reshape(bs, self.comps, self.dim).to(self.device)
-        delta = torch.div(torch.mul(learning_rate_multiplier, input1 - input2).sum(0), bs)                          
-        self.weights = torch.add(self.weights, delta).detach()
-        
-        return bmu_dist.sum().cpu().detach().numpy()
+

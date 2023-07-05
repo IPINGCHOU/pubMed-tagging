@@ -74,20 +74,20 @@ def test_som():
         batch_size = batch_size
     )
 
-    before_train_weight = som.weights.cpu().detach().numpy()
+    before = som.contents.cpu().detach().numpy()
 
     # train
     for iter_no in range(n_iters):
         for i, data in tqdm(enumerate(pubMedLoader)):
             _ = som(*data, iter_no)
 
-    after_train_weight = som.weights.cpu().detach().numpy()
+    after = som.contents.cpu().detach().numpy()
 
-    assert (before_train_weight == after_train_weight).all() == False
+    assert (before == after).all() == False
 
 
 def test_map_vects():
-    batch_size = 4
+    batch_size = 2
     n_iters = 5
     n_workers = 4
 
@@ -105,8 +105,8 @@ def test_map_vects():
     )
 
     som = utils.SapBERTembeddedSOM(
-        m = 5,
-        n = 5,
+        m = 10,
+        n = 10,
         dim = 768, # output dim from pretrained SapBERT
         niter = n_iters,
         batch_size = batch_size
@@ -114,6 +114,8 @@ def test_map_vects():
 
     mapped = []
     for i, data in tqdm(enumerate(pubMedLoader)):
-        mapped.extend(som.map_vects(*data))
+        out = som.map_vects(*data)
+        print(out)
+        mapped.extend(out)
     
-    assert np.array(mapped).shape == (4,2)
+    assert np.array(mapped).shape == (4,)

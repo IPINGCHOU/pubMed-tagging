@@ -1,5 +1,6 @@
 #%% import packages
 import utils
+import som
 import numpy as np
 import pandas as pd
 import torch
@@ -37,16 +38,16 @@ from collections import OrderedDict
 with open('./preprocessed_title.pkl', 'rb') as f:
     title = pickle.load(f)
 
-title = random.sample(title, 2000)
+title = random.sample(title, 10000)
 
 # %% feed to the model
 N_WORKERS = 16
-BATCH_SIZE = 8
-N_ITERS = 10
+BATCH_SIZE = 256
+N_EPOCHS = 100
 TOKEN_MAX_LENGTH = 30
-SOM_ALPHA = 1
-M = 50
-N = 50
+SOM_LR = 0.01
+M = 10
+N = 10
 
 tokenizer = AutoTokenizer.from_pretrained("cambridgeltl/SapBERT-from-PubMedBERT-fulltext")
 pubMedDataset = utils.pubMedDataset(title,
@@ -60,30 +61,47 @@ pubMedLoader = torch.utils.data.DataLoader(
     shuffle = True,
 )
 
-som = utils.SapBERTembeddedSOM(
-    m = M,
-    n = N,
-    dim = 768, # output dim from pretrained SapBERT
-    niter = N_ITERS,
-    batch_size = BATCH_SIZE
-)
-
-
+somEmbedder = utils.SapBERTembedded()
 # train
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-for iter_no in range(N_ITERS):
-    loader = tqdm(enumerate(pubMedLoader), total = len(pubMedLoader))
-    loader.set_description("Iter: {0}".format(iter_no))
-    total_bmu_d = 0
-    for i, data in loader:
-        bmu_d = som(*data, iter_no)
-        total_bmu_d += np.power(bmu_d, 2)
-        loader.set_postfix(OrderedDict(bmu_d = bmu_d))
-    
-    som.save_model(iter_no)
-    
-    print("Average best unit distance^2: {0:.3f}".format(total_bmu_d / len(pubMedLoader)))
-    grid = som.give_density_map(pubMedLoader)
-    
-# grid = som.give_density_map(pubMedLoader)
+embeddings = []
+loader = tqdm(enumerate(pubMedLoader), total = len(pubMedLoader))
+for i, data in loader:
+    embedded = somEmbedder(*data)
+    embeddings.extend(embedded)
+
+embeddings = np.array(embeddings)
+del somEmbedder
+
+embedLoader = torch.utils.data.DataLoader(
+    embeddings,
+    batch_size = BATCH_SIZE,
+    num_workers = N_WORKERS,
+    shuffle = True
+)
+
 #%%
+from importlib import reload 
+som = reload(som)
+# train
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+somNet = som.SOM(
+    m = M,
+    n = N,
+    dim = 768,
+    niter = len(embedLoader),
+    epochs = N_EPOCHS,
+    lr = SOM_LR,
+)
+
+for epoch in range(N_EPOCHS):
+    carryover = epoch * len(embedLoader)
+    for iter, batch_data in tqdm(enumerate(embedLoader), total = len(embedLoader), desc = "Epoch: {}".format(epoch)):
+        somNet(batch_data, epoch)
+    
+    if epoch % 10 == 0:
+        somNet.give_density_map(embedLoader)
+somNet.give_density_map(embedLoader)
+
+#%%
+
