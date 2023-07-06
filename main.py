@@ -38,16 +38,18 @@ from collections import OrderedDict
 with open('./preprocessed_title.pkl', 'rb') as f:
     title = pickle.load(f)
 
-title = random.sample(title, 10000)
+# title = random.sample(title, 500)
+# title = title[:500]
 
 # %% feed to the model
 N_WORKERS = 16
-BATCH_SIZE = 256
-N_EPOCHS = 100
+BATCH_SIZE = 16
+N_EPOCHS = 500
 TOKEN_MAX_LENGTH = 30
 SOM_LR = 0.01
-M = 10
-N = 10
+M = 5
+N = 5
+PLOT_STEP = 100
 
 tokenizer = AutoTokenizer.from_pretrained("cambridgeltl/SapBERT-from-PubMedBERT-fulltext")
 pubMedDataset = utils.pubMedDataset(title,
@@ -94,12 +96,13 @@ somNet = som.SOM(
     lr = SOM_LR,
 )
 
-for epoch in range(N_EPOCHS):
+for epoch in tqdm(range(N_EPOCHS), desc = "Training:"):
     carryover = epoch * len(embedLoader)
-    for iter, batch_data in tqdm(enumerate(embedLoader), total = len(embedLoader), desc = "Epoch: {}".format(epoch)):
+    for iter, batch_data in enumerate(embedLoader):
         somNet(batch_data, epoch)
+    somNet.update()
     
-    if epoch % 10 == 0:
+    if epoch % PLOT_STEP == 0:
         somNet.give_density_map(embedLoader)
 somNet.give_density_map(embedLoader)
 

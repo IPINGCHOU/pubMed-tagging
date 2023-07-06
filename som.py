@@ -34,8 +34,8 @@ class SOM(nn.Module):
         
         # init parameters
         self.all_weights = torch.randn(self.m, self.n, self.dim).to(self.device)        
-        # self.numerator = torch.zeros(self.m, self.n, self.dim).to(self.device)
-        # self.denominator = torch.zeros(self.m, self.n, 1)
+        self.numerator = torch.zeros(self.m, self.n, self.dim).to(self.device)
+        self.denominator = torch.zeros(self.m, self.n, 1).to(self.device)
         # map coordinate
         self.unravel_precomputed = list(np.unravel_index(np.arange(self.comps),
                                                     (self.m, self.n)))
@@ -66,13 +66,17 @@ class SOM(nn.Module):
         
         neighbor = self.neighborhood_caller(wins) * self.learning_rate
         
-        denominator = torch.sum(neighbor, 0).unsqueeze(-1)
+        self.denominator += torch.sum(neighbor, 0).unsqueeze(-1)
         
         neighbor = neighbor.reshape(self.bs, -1)
         neighbor = torch.mm(torch.transpose(neighbor, 0, 1), data)
-        neighbor = neighbor.view(self.m, self.n, self.dim)
+        self.numerator += neighbor.view(self.m, self.n, self.dim)
         
-        self.all_weights = torch.where(denominator != 0, neighbor / denominator, self.all_weights).detach()
+    def update(self):
+        self.all_weights = torch.where(self.denominator != 0, self.numerator / self.denominator, self.all_weights).detach()
+        # init denom and num
+        self.numerator.zero_()
+        self.denominator.zero_()
         
     def _update_sigma(self, n_iter: int) -> None:
         self.sigma = self.start_sigma * np.exp(-n_iter / self.tau)
