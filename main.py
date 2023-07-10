@@ -13,6 +13,8 @@ import random
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 from collections import OrderedDict
+
+from wordcloud import WordCloud, STOPWORDS
 #%% read files
 # df = pd.read_excel("input_file.xlsx", sheet_name = "Sheet1", header = 0)
 
@@ -38,8 +40,8 @@ from collections import OrderedDict
 with open('./preprocessed_title.pkl', 'rb') as f:
     title = pickle.load(f)
 
-# title = random.sample(title, 500)
-# title = title[:500]
+title = random.sample(title, 30000)
+# title = title[:10000]
 
 # %% feed to the model
 N_WORKERS = 16
@@ -60,7 +62,7 @@ pubMedLoader = torch.utils.data.DataLoader(
     pubMedDataset,
     batch_size = BATCH_SIZE,
     num_workers = N_WORKERS,
-    shuffle = True,
+    shuffle = False,
 )
 
 somEmbedder = utils.SapBERTembedded()
@@ -108,3 +110,47 @@ somNet.give_density_map(embedLoader)
 
 #%%
 
+test_embedLoader = torch.utils.data.DataLoader(
+    embeddings,
+    batch_size = BATCH_SIZE,
+    num_workers = N_WORKERS,
+    shuffle = False
+)
+
+out = somNet.give_density_map(test_embedLoader)
+
+output = pd.DataFrame({
+    "topics": title,
+    "tags": out
+}, index = None)
+output.to_csv("bs_30k_tagged25.csv")
+
+#%% Give wordcloud
+SINGLESIZE = 8
+MAX_WORDS = 100
+
+plt.figure()
+fig, axs = plt.subplots(M, N, figsize = (M*SINGLESIZE, N*SINGLESIZE)) 
+axs = axs.flatten()
+
+stopwords = set(STOPWORDS)
+stopwords.add("breast")
+stopwords.add("cancer")
+stopwords.add("breast cancer")
+
+for i in range(M * N):
+    temp = output[output["tags"] == i]["topics"]
+    text = " ".join(list(temp))
+    wc = WordCloud(max_font_size = 40,
+                   width = 600,
+                   height = 600,
+                   stopwords = stopwords,
+                   max_words = MAX_WORDS
+                   ).generate(text)
+    
+    axs[i].imshow(wc, interpolation = "bilinear")
+    axs[i].axis("off")
+
+plt.show()
+
+# %%

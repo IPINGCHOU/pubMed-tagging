@@ -134,7 +134,7 @@ class SOM(nn.Module):
         plt.colorbar()
         plt.show()
         
-        return C
+        return out
     
     def find_bmu_ix(self, vecs):
         dists = self.pairdist(vecs, self.all_weights.reshape(self.m * self.n, self.dim))
